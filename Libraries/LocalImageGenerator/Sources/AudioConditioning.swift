@@ -8,7 +8,9 @@ import NNC
 // AVC retains full-span encoded conditioning across segment calls. Encoding happens inside
 // the generation branch; its result is reused directly across hires passes.
 final class AudioConditioningContext {
-  let waveform: Tensor<Float>
+  // LongCat AVC carries a single driving audio; MiniMax H3 Ref2VA carries one entry per
+  // reference audio, each producing its own conditioning tensor.
+  let waveforms: [Tensor<Float>]
   let encoderFilePath: String?
   let videoFrames: Int
   let zeroAudioFeatures: Bool
@@ -16,10 +18,10 @@ final class AudioConditioningContext {
   var encodedAudioCond: [Tensor<FloatType>]?
 
   init(
-    waveform: Tensor<Float>, encoderFilePath: String?, videoFrames: Int,
+    waveforms: [Tensor<Float>], encoderFilePath: String?, videoFrames: Int,
     zeroAudioFeatures: Bool = false
   ) {
-    self.waveform = waveform
+    self.waveforms = waveforms
     self.encoderFilePath = encoderFilePath
     self.videoFrames = videoFrames
     self.zeroAudioFeatures = zeroAudioFeatures
@@ -42,12 +44,13 @@ extension LocalImageGenerator {
           features = .zero(
             videoFrames: audio.videoFrames, framesPerSecond: framesPerSecond)
         } else {
-          guard let filePath = audio.encoderFilePath else { return nil }
+          guard let filePath = audio.encoderFilePath, let waveform = audio.waveforms.first
+          else { return nil }
           let isCancelled = ManagedAtomic(false)
           cancellation { isCancelled.store(true, ordering: .releasing) }
           guard
             let encoded = try? LongCatAudioConditioningEncoder(filePath: filePath).encode(
-              audio.waveform, videoFrames: audio.videoFrames, framesPerSecond: framesPerSecond,
+              waveform, videoFrames: audio.videoFrames, framesPerSecond: framesPerSecond,
               shouldContinue: { !isCancelled.load(ordering: .acquiring) })
           else { return nil }
           features = encoded
@@ -60,7 +63,6 @@ extension LocalImageGenerator {
       ).segment(startFrame: audio.startFrame, videoFrames: videoFrames)
         .tensors.map { graph.variable($0.toGPU(0)) }
     case .minimaxH3:
-      guard audio.waveform.shape[0] == 1 || audio.waveform.shape[0] == 2 else { return nil }
       guard let filePath = audio.encoderFilePath else { return nil }
       let scaling = ModelZoo.latentsScalingForModel(model)
       guard let mean = scaling.audioMean, let std = scaling.audioStd,
@@ -68,45 +70,55 @@ extension LocalImageGenerator {
       else { return nil }
       let isCancelled = ManagedAtomic(false)
       cancellation { isCancelled.store(true, ordering: .releasing) }
-      let sampleCount = audio.waveform.shape[1]
-      let inputLength = (sampleCount + 799) / 800 * 800
-      let latentLength = inputLength / 800
-      let encoder = MiniMaxH3AudioEncoder(inputLength: inputLength)
-      encoder.maxConcurrency = .limit(4)
-      var latents = Tensor<Float>(.CPU, .HWC(1, 2 * latentLength, 32))
-      for channel in 0..<audio.waveform.shape[0] {
+      // Each reference audio encodes independently and yields its own conditioning tensor.
+      // UNetFixedEncoder derives referenceAudios from this list, assigning positions in order.
+      var encodedAudios = [DynamicGraph.Tensor<FloatType>]()
+      for waveform in audio.waveforms {
         guard !isCancelled.load(ordering: .acquiring) else { return nil }
-        var waveform = Tensor<Float>(
-          Array(repeating: 0, count: inputLength), .CPU, .NCHW(1, 1, 1, inputLength))
-        waveform[0..<1, 0..<1, 0..<1, 0..<sampleCount] = audio.waveform[
-          channel..<(channel + 1), 0..<sampleCount
-        ].copied().reshaped(.NCHW(1, 1, 1, sampleCount))
-        let input = graph.variable(waveform.toGPU(0))
-        if channel == 0 {
-          encoder.compile(inputs: input)
-          graph.openStore(
-            filePath, flags: .readOnly,
-            externalStore: TensorData.externalStore(filePath: filePath)
-          ) { store in
-            try! store.read(
-              "audio_encoder", model: encoder, strict: true, codec: [.ezm7, .externalData])
+        guard waveform.shape[0] == 1 || waveform.shape[0] == 2 else { return nil }
+        let sampleCount = waveform.shape[1]
+        let inputLength = (sampleCount + 799) / 800 * 800
+        let latentLength = inputLength / 800
+        // The encoder pads to inputLength, so it is rebuilt per audio whenever lengths differ.
+        let encoder = MiniMaxH3AudioEncoder(inputLength: inputLength)
+        encoder.maxConcurrency = .limit(4)
+        var latents = Tensor<Float>(.CPU, .HWC(1, 2 * latentLength, 32))
+        for channel in 0..<waveform.shape[0] {
+          guard !isCancelled.load(ordering: .acquiring) else { return nil }
+          var padded = Tensor<Float>(
+            Array(repeating: 0, count: inputLength), .CPU, .NCHW(1, 1, 1, inputLength))
+          padded[0..<1, 0..<1, 0..<1, 0..<sampleCount] = waveform[
+            channel..<(channel + 1), 0..<sampleCount
+          ].copied().reshaped(.NCHW(1, 1, 1, sampleCount))
+          let input = graph.variable(padded.toGPU(0))
+          if channel == 0 {
+            encoder.compile(inputs: input)
+            graph.openStore(
+              filePath, flags: .readOnly,
+              externalStore: TensorData.externalStore(filePath: filePath)
+            ) { store in
+              try! store.read(
+                "audio_encoder", model: encoder, strict: true, codec: [.ezm7, .externalData])
+            }
+          }
+          let encoded = encoder(inputs: input)[0].as(of: Float.self).rawValue.toCPU()
+          guard !isCancelled.load(ordering: .acquiring) else { return nil }
+          // Native Ref2VA uses the posterior mean, with independent left/right channels.
+          for row in 0..<latentLength {
+            for feature in 0..<32 {
+              latents[0, channel * latentLength + row, feature] =
+                (encoded[0, row, feature] - mean[feature]) / std[feature]
+            }
           }
         }
-        let encoded = encoder(inputs: input)[0].as(of: Float.self).rawValue.toCPU()
-        guard !isCancelled.load(ordering: .acquiring) else { return nil }
-        // Native Ref2VA uses the posterior mean, with independent left/right channels.
-        for row in 0..<latentLength {
-          for feature in 0..<32 {
-            latents[0, channel * latentLength + row, feature] =
-              (encoded[0, row, feature] - mean[feature]) / std[feature]
-          }
+        if waveform.shape[0] == 1 {
+          latents[0..<1, latentLength..<(2 * latentLength), 0..<32] =
+            latents[0..<1, 0..<latentLength, 0..<32].copied()
         }
+        encodedAudios.append(graph.variable(Tensor<FloatType>(from: latents).toGPU(0)))
       }
-      if audio.waveform.shape[0] == 1 {
-        latents[0..<1, latentLength..<(2 * latentLength), 0..<32] =
-          latents[0..<1, 0..<latentLength, 0..<32].copied()
-      }
-      return [graph.variable(Tensor<FloatType>(from: latents).toGPU(0))]
+      guard !encodedAudios.isEmpty else { return nil }
+      return encodedAudios
     case .v1, .v2, .kandinsky21, .sdxlBase, .sdxlRefiner, .ssd1b, .svdI2v, .wurstchenStageC,
       .wurstchenStageB, .sd3, .pixart, .auraflow, .flux1, .sd3Large, .hunyuanVideo, .wan21_1_3b,
       .wan21_14b, .hiDreamI1, .hiDreamO1, .qwenImage, .qwenImage2_1, .wan22_5b, .zImage,

@@ -89,8 +89,8 @@ extension LocalImageGenerator {
     // The first segment encodes the full audio inside encodeAudioCond. Later segments slice
     // that encoded conditioning so interpolation and audio windows remain continuous.
     let audioContext = AudioConditioningContext(
-      waveform: audio, encoderFilePath: encoderFilePath, videoFrames: plan.generatedVideoFrames,
-      zeroAudioFeatures: zeroAudioFeatures)
+      waveforms: [audio], encoderFilePath: encoderFilePath,
+      videoFrames: plan.generatedVideoFrames, zeroAudioFeatures: zeroAudioFeatures)
     var allFrames = [Tensor<FloatType>]()
     var currentSegmentFrames = [Tensor<FloatType>]()
     for segmentIndex in 0..<plan.segmentCount {
