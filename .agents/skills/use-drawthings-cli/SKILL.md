@@ -1,6 +1,6 @@
 ---
 name: use-drawthings-cli
-description: Use and troubleshoot an already installed Homebrew draw-things-cli for model discovery, authentication, local, cloud, or remote image generation, basic image-to-image and video generation, output verification, and safe agent operation. Use when a new user or agent needs to inspect Draw Things CLI commands or models, generate a first image, sign in to Draw Things cloud, connect to a Draw Things server, or diagnose common generation failures after installation.
+description: Use and troubleshoot an already installed Homebrew draw-things-cli for model discovery, authentication, local, cloud, or remote image generation, basic image-to-image and video generation including reference audio, output verification, and safe agent operation. Use when a new user or agent needs to inspect Draw Things CLI commands or models, generate a first image, generate video from one or more reference audios, sign in to Draw Things cloud, connect to a Draw Things server, or diagnose common generation failures after installation.
 ---
 
 # Use Draw Things CLI
@@ -226,6 +226,35 @@ draw-things-cli generate \
 Respect model-specific frame-count and dimension constraints. Width and height overrides must be
 multiples of 64.
 
+## Use Reference Audio
+
+`--audio` supplies reference audio, not a driving track. What it accepts depends on the model:
+
+- **MiniMax H3 Ref2VA** accepts one or more reference audios. Repeat `--audio` once per file; the
+  supplied order fixes the `<Audio N>` numbering, which the CLI adds to the prompt for you.
+- **LongCat-Video-Avatar 1.5** takes exactly one driving audio, and `--avc` takes exactly one.
+- Both are local-only; remote and cloud reject `--audio`.
+
+```sh
+draw-things-cli generate \
+  --model minimax_h3_ref2va_i8x.ckpt \
+  --prompt "Two people sit in a park. The woman on the left greets the man on the right." \
+  --audio /path/to/speaker-a.wav \
+  --audio /path/to/speaker-b.wav \
+  --output /path/to/clip.mp4
+```
+
+Each reference audio becomes one `<Audio N>` token, but the CLI emits no `<Subject N>` token, so
+nothing binds a voice to a person on screen. Describe position or appearance in the prompt to
+associate each voice with a subject.
+
+MiniMax H3 additionally constrains `--frames` to `1` or `17k + 5` within `5...362`, and the model
+documents 2-15 second reference audios. The CLI does not enforce those audio bounds, so keep the
+total short.
+
+If the installed CLI rejects a repeated `--audio`, it predates multi-reference support; pass a
+single file, or check `generate --help` before assuming the capability is present.
+
 ## Preserve Configuration Semantics
 
 Apply configuration in this order:
@@ -274,6 +303,8 @@ writing the new container.
   requirements before retrying.
 - Remote/cloud video or audio error: use local generation; the current remote protocol does not
   carry those outputs or audio conditioning.
+- A second `--audio` rejected or ignored: the installed CLI predates multi-reference audio; pass one
+  file, or use a CLI built with multi-reference support.
 - Invalid dimensions: use width and height values divisible by 64.
 - A long quiet local run: distinguish model download, graph compilation, sampling, and export; do
   not launch duplicate generation processes merely because output pauses.
