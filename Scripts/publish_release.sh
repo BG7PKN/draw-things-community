@@ -82,12 +82,23 @@ FORK_COUNT=$(git rev-list --count "$UPSTREAM_BASE..release")
 
 # --- tag --------------------------------------------------------------------
 
+# v<YY>.<MMDD>-fork.<N>: the date is when you cut the release, "-fork" keeps the
+# tag distinct from upstream's v<YY>.<MMDD>.<N>, and N counts re-releases cut
+# that same day, going back to 1 the next day. Because release branches off
+# main, any tag pointing at HEAD is ours.
 DATE=$(date +%y.%m%d)
 LATEST=$(git tag -l "v${DATE}-fork.*" | sed 's/.*-fork\.//' | sort -n | tail -1)
 N=$(( ${LATEST:-0} + 1 ))
 TAG="v${DATE}-fork.${N}"
 
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && die "tag $TAG 已存在"
+
+AT_HEAD=$(git tag --points-at HEAD | tr '\n' ' ')
+[[ -z "$AT_HEAD" ]] || die "当前 commit 已经打过 tag：${AT_HEAD}——不重复发。要重发请先提交新改动。"
+
+# The tag only identifies *which* release; spell out what the fork changes for
+# anyone landing on the Releases page.
+RELEASE_TITLE="$TAG · draw-things-cli（H3 多条参考音频）"
 
 # --- build ------------------------------------------------------------------
 
@@ -113,6 +124,8 @@ NOTES=$(mktemp -t publish-release-notes)
 trap 'rm -f "$NOTES"' EXIT
 
 {
+  echo "> 这是 **fork 构建**，不是官方版本 —— tag 格式与官方一致，官方并没有同名构建。"
+  echo
   echo "基于上游 \`${UPSTREAM_BASE:0:8}\`（${BASE_DATE}）构建。"
   echo
   echo "## 本版相对官方 draw-things-cli 的改动（${FORK_COUNT} 个提交）"
@@ -147,7 +160,7 @@ if (( DRY_RUN )); then
   echo "    [dry-run] git tag -a $TAG"
   echo "    [dry-run] git push origin release"
   echo "    [dry-run] git push origin $TAG"
-  echo "    [dry-run] gh release create $TAG $BINARY --title $TAG --notes-file <下方内容>"
+  echo "    [dry-run] gh release create $TAG $BINARY --title '$RELEASE_TITLE' --notes-file <下方内容>"
   echo
   echo "---------- Release 说明预览 ----------"
   cat "$NOTES"
@@ -158,6 +171,6 @@ fi
 git tag -a "$TAG" -m "$TAG"
 git push origin release
 git push origin "$TAG"
-gh release create "$TAG" "$BINARY" --title "$TAG" --notes-file "$NOTES"
+gh release create "$TAG" "$BINARY" --title "$RELEASE_TITLE" --notes-file "$NOTES"
 
 note "发布完成：https://github.com/${SLUG}/releases/tag/${TAG}"
