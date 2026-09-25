@@ -124,16 +124,20 @@ NOTES=$(mktemp -t publish-release-notes)
 trap 'rm -f "$NOTES"' EXIT
 
 {
-  echo "> 这是 **fork 构建**，不是官方版本 —— tag 格式与官方一致，官方并没有同名构建。"
+  echo "> **这是 fork 构建**，官方 Releases 里没有对应版本 —— tag 里的 \`-fork\` 就是标记。"
   echo
   echo "基于上游 \`${UPSTREAM_BASE:0:8}\`（${BASE_DATE}）构建。"
   echo
-  echo "## 本版相对官方 draw-things-cli 的改动（${FORK_COUNT} 个提交）"
+  echo "## 相对官方的改动"
+  echo
+  echo "**MiniMax H3 Ref2VA 支持多条参考音频** —— 官方只吃 1 条，本版 \`--audio\`"
+  echo "可重复传入，用法对齐 \`--image\`。LongCat 与 \`--avc\` 不变，仍要求恰好 1 条音频。"
+  echo
+  echo "<details><summary>全部 ${FORK_COUNT} 个提交（含发版工具本身）</summary>"
   echo
   git log --no-decorate --format='- %s' "$UPSTREAM_BASE..release"
   echo
-  echo "主要差异：**MiniMax H3 Ref2VA 支持多条参考音频** —— 官方只吃 1 条，本版 \`--audio\`"
-  echo "可重复传入，用法对齐 \`--image\`。LongCat 与 \`--avc\` 不变，仍要求恰好 1 条音频。"
+  echo "</details>"
   echo
   echo "## 安装"
   echo
