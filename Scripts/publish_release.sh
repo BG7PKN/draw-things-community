@@ -55,8 +55,13 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD)
 [[ "$BRANCH" == "release" ]] || die "必须在 release 分支上（当前在 '$BRANCH'）"
 [[ -z "$(git status --porcelain)" ]] || die "工作区不干净，先提交或 stash"
 
-SLUG=$(git remote get-url origin | sed -E 's#^.*[:/]([^/]+/[^/]+?)(\.git)?$#\1#')
-[[ "$SLUG" == */* ]] || die "无法从 origin 解析 owner/repo，得到：$SLUG"
+REMOTE_URL=$(git remote get-url origin 2>/dev/null) || die "没有名为 origin 的 remote"
+REMOTE_URL=${REMOTE_URL%.git}
+REMOTE_URL=${REMOTE_URL//:/\/}          # git@host:owner/repo -> git@host/owner/repo
+SLUG_TAIL=${REMOTE_URL##*/}
+SLUG_HEAD=${REMOTE_URL%/*}
+SLUG="${SLUG_HEAD##*/}/${SLUG_TAIL}"
+[[ "$SLUG" == */* && "$SLUG" != /* ]] || die "无法从 origin 解析 owner/repo，得到：$SLUG"
 
 # main mirrors upstream, so the merge base of main and release is the upstream
 # commit the fork patches were rebased onto.
